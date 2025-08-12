@@ -1,0 +1,6 @@
+gradio==4.44.0
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+joblib==1.4.2
+pymongo==4.8.0
