@@ -1,174 +1,191 @@
-# app.py — Streamlit NAFLD Lifestyle Risk Predictor
-import json
-import joblib
-import pandas as pd
+# app.py — NAFLD Risk Self-Screening (self-contained, no pickle / sklearn)
+# Minimal dependencies: just streamlit. Everything else is plain Python.
+
+import math
 import streamlit as st
 
-# -------------------- Page config --------------------
-st.set_page_config(
-    page_title="NAFLD Lifestyle Risk Predictor",
-    page_icon="🧠",
-    layout="wide",
-)
+st.set_page_config(page_title="NAFLD Risk Self-Screening Tool", page_icon="🧪", layout="wide")
+st.title("NAFLD Risk Self-Screening Tool")
+st.write("Enter your data below to receive a **non-diagnostic** risk estimate. No data is stored.")
 
-st.title("NAFLD Lifestyle Risk Predictor")
-st.caption(
-    "This app estimates your likelihood of NAFLD using lifestyle and demographic inputs. "
-    "It is not a medical diagnosis and should not replace professional medical advice."
-)
-
-# -------------------- Load artifacts --------------------
-@st.cache_resource
-def load_pipeline():
-    return joblib.load("pipeline.pkl")
-
-@st.cache_resource
-def load_features():
-    with open("feature_order.json") as f:
-        feats = json.load(f)
-    # sanitize: strip blanks / dups, keep order
-    clean, seen = [], set()
-    for x in feats:
-        name = str(x).strip()
-        if name and name not in seen:
-            clean.append(name); seen.add(name)
-    return clean
-
-try:
-    pipeline = load_pipeline()
-except Exception as e:
-    st.error(f"Could not load pipeline.pkl: {e}")
-    st.stop()
-
-try:
-    FEATURES = load_features()
-except Exception as e:
-    st.error(f"Could not read feature_order.json: {e}")
-    st.stop()
-
-# -------------------- UI dictionaries --------------------
-CATEGORICAL_CHOICES = {
-    "Gender": ["Male", "Female"],
-    "Race/Ethnicity": ["Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other"],
-    "Smoking status": ["Never", "Former", "Current"],
-    "Sleep Disorder Status": ["No", "Yes"],
+# --- Choices (match your previous UI) ---
+CHOICES = {
+    "RIAGENDR": ["Male","Female"],
+    "RIDRETH3": [
+        "Mexican American","Other Hispanic","Non-Hispanic White",
+        "Non-Hispanic Black","Non-Hispanic Asian","Other/Multi"
+    ],
+    "ALQ111": ["Yes","No"],
+    "ALQ151": ["Yes","No"],
+    "SLQ120": ["Yes","No"],
+    "SLQ050": ["Never","Rarely","Sometimes","Often","Almost always"],
+    "Is_Smoker_Cat": ["Never","Former","Current"],
 }
 
-RANGE_PRESETS = {
-    # Demographics / socioeconomics
-    "Age in years": dict(min_value=18, max_value=85, value=40, step=1.0),
-    "Family income ratio": dict(min_value=0.0, max_value=5.0, value=2.0, step=0.1),
+# --- Helper to compute a transparent, rule-based risk score (no ML) ---
+def compute_risk_and_contribs(
+    RIAGENDR, RIDRETH3, RIDAGEYR, INDFMPIR,
+    ALQ111, ALQ142, Is_Smoker_Cat, ALQ121, ALQ170, ALQ151,
+    SLQ050, SLD012, SLQ120,
+    DR1TKCAL, DR1TPROT, DR1TCARB, DR1TSUGR, DR1TFIBE, DR1TTFAT,
+    PAQ620, BMXBMI
+):
+    contribs = []
 
-    # Sleep / activity
-    "Sleep duration (hours/day)": dict(min_value=3.0, max_value=12.0, value=7.0, step=0.5),
-    "Work schedule duration (hours)": dict(min_value=0.0, max_value=16.0, value=8.0, step=0.5),
-    "Physical activity (minutes/day)": dict(min_value=0, max_value=300, value=30, step=5),
+    # Intercept keeps baseline low
+    s = -4.0
 
-    # Anthropometrics
-    "BMI": dict(min_value=15.0, max_value=50.0, value=28.0, step=0.1),
+    # Age (centered at 45): +0.03 per year
+    age_c = (RIDAGEYR - 45) * 0.03
+    s += age_c; contribs.append(("Age", age_c))
+
+    # BMI (centered at 25): +0.12 per BMI point
+    bmi_c = (BMXBMI - 25.0) * 0.12
+    s += bmi_c; contribs.append(("BMI", bmi_c))
 
     # Alcohol
-    "Number of days drank in the past year": dict(min_value=0, max_value=365, value=0, step=1),
-    "Alcohol consumption (days/week)": dict(min_value=0.0, max_value=7.0, value=0.0, step=0.5),
-    "Alcohol drinks per day": dict(min_value=0.0, max_value=10.0, value=0.0, step=0.5),
-    "Max number of drinks on any single day": dict(min_value=0, max_value=20, value=0, step=1),
-    "Alcohol intake frequency (drinks/day)": dict(min_value=0.0, max_value=10.0, value=0.0, step=0.1),
+    drinks_day_c = float(ALQ142) * 0.15
+    s += drinks_day_c; contribs.append(("Drinks per drinking day", drinks_day_c))
 
-    # Diet
-    "Total calorie intake (kcal)": dict(min_value=800, max_value=5000, value=2200, step=50),
-    "Total fat (g)": dict(min_value=10, max_value=200, value=70, step=1),
-    "Saturated fat (g)": dict(min_value=0, max_value=80, value=25, step=1),
-    "Added sugar (g)": dict(min_value=0, max_value=150, value=30, step=1),
-    "Dietary fiber (g)": dict(min_value=0, max_value=80, value=20, step=1),
-    "Fruit/veg servings per day": dict(min_value=0.0, max_value=10.0, value=3.0, step=0.5),
-    "Sugary drinks per week": dict(min_value=0.0, max_value=50.0, value=0.0, step=1.0),
-}
+    binge_days_c = float(ALQ170) * 0.01
+    s += binge_days_c; contribs.append(("Days 5+/4+ drinks (year)", binge_days_c))
 
-HELP_TEXT = {
-    "Family income ratio": "NHANES Poverty Income Ratio (0–~5, higher ≈ higher income).",
-    "Alcohol intake frequency (drinks/day)": "Average daily number of drinks.",
-}
+    ever_binge_c = 0.4 if ALQ151 == "Yes" else 0.0
+    s += ever_binge_c; contribs.append(("Ever 5+/4+ drinks in day", ever_binge_c))
 
-GROUPS = {
-    "Demographics": [
-        "Gender","Age in years","Race/Ethnicity","Family income ratio","Smoking status"
-    ],
-    "Sleep & Activity": [
-        "Sleep Disorder Status","Sleep duration (hours/day)",
-        "Work schedule duration (hours)","Physical activity (minutes/day)"
-    ],
-    "Anthropometrics": ["BMI"],
-    "Alcohol": [
-        "Number of days drank in the past year","Alcohol consumption (days/week)",
-        "Alcohol drinks per day","Max number of drinks on any single day",
-        "Alcohol intake frequency (drinks/day)"
-    ],
-    "Diet": [
-        "Total calorie intake (kcal)","Total fat (g)","Saturated fat (g)",
-        "Added sugar (g)","Dietary fiber (g)","Fruit/veg servings per day","Sugary drinks per week"
-    ],
-}
+    freq_year_c = float(ALQ121) * 0.003
+    s += freq_year_c; contribs.append(("How often drink (days/year)", freq_year_c))
 
-def widget_for(name: str):
-    help_txt = HELP_TEXT.get(name)
-    if name in CATEGORICAL_CHOICES:
-        return st.selectbox(name, CATEGORICAL_CHOICES[name], help=help_txt, key=name)
-    if name in RANGE_PRESETS:
-        p = RANGE_PRESETS[name]
-        # slider for moderate ranges, number_input otherwise
-        if (p["max_value"] - p["min_value"]) <= 200:
-            return st.slider(name, help=help_txt, **p)
-        else:
-            return st.number_input(name, help=help_txt, **p)
-    # fallback numeric if we don't have a preset
-    return st.number_input(name, value=0.0, step=0.1, help=help_txt, key=name)
+    # Smoking
+    smoker_map = {"Never": 0.0, "Former": 0.2, "Current": 0.5}
+    smoke_c = smoker_map.get(Is_Smoker_Cat, 0.0)
+    s += smoke_c; contribs.append(("Smoking status", smoke_c))
 
-# -------------------- Layout & inputs --------------------
-left, right = st.columns([2, 1])
+    # Sleep
+    trouble_map = {"Never": 0.0,"Rarely": 0.1,"Sometimes": 0.2,"Often": 0.3,"Almost always": 0.4}
+    sleep_trouble_c = trouble_map.get(SLQ050, 0.0)
+    s += sleep_trouble_c; contribs.append(("Sleep trouble", sleep_trouble_c))
 
-with left:
-    st.subheader("Inputs")
-    values_dict = {}
+    sleep_dx_c = 0.2 if SLQ120 == "Yes" else 0.0
+    s += sleep_dx_c; contribs.append(("Sleep diagnosis", sleep_dx_c))
 
-    # Render by groups, only for features present in FEATURES (order preserved)
-    for group_name, group_feats in GROUPS.items():
-        feats = [f for f in FEATURES if f in group_feats]
-        if feats:
-            with st.expander(group_name, expanded=True):
-                cols = st.columns(2)
-                for i, fname in enumerate(feats):
-                    with cols[i % 2]:
-                        values_dict[fname] = widget_for(fname)
+    sleep_hours_c = 0.08 * abs(float(SLD012) - 7.0)  # farther from ~7h => higher risk
+    s += sleep_hours_c; contribs.append(("Sleep hours (deviation from 7h)", sleep_hours_c))
 
-    # Any remaining features not listed above
-    remaining = [f for f in FEATURES if all(f not in g for g in GROUPS.values())]
-    if remaining:
-        with st.expander("Other", expanded=False):
-            cols = st.columns(2)
-            for i, fname in enumerate(remaining):
-                with cols[i % 2]:
-                    values_dict[fname] = widget_for(fname)
+    # Diet (simple heuristics)
+    kcal_c = max(0.0, (float(DR1TKCAL) - 2000.0)) * 0.0002
+    s += kcal_c; contribs.append(("Total kcal (above 2000)", kcal_c))
 
-# Keep exact model order
-values = [values_dict[f] for f in FEATURES]
+    sugar_c = float(DR1TSUGR) * 0.0005
+    s += sugar_c; contribs.append(("Sugar (g)", sugar_c))
 
-# -------------------- Predict --------------------
-with right:
-    st.subheader("Prediction")
-    go = st.button("Predict", type="primary", use_container_width=True)
-    prog = st.empty()
-    msg_box = st.empty()
-    metric_box = st.empty()
+    carbs_c = max(0.0, float(DR1TCARB) - 200.0) * 0.0008
+    s += carbs_c; contribs.append(("Carbs (g above 200)", carbs_c))
 
-    if go:
-        try:
-            X = pd.DataFrame([values], columns=FEATURES)
-            proba = float(pipeline.predict_proba(X)[:, 1][0])  # 0..1
-            pct = round(proba * 100, 1)
-            band = "High risk" if pct >= 50 else "Low/moderate risk"
+    fiber_c = -0.002 * float(DR1TFIBE)  # protective
+    s += fiber_c; contribs.append(("Fiber (g)", fiber_c))
 
-            prog.progress(proba, text="Predicted probability")
-            msg_box.success(f"Predicted NAFLD risk: **{pct}%** — **{band}**")
-            metric_box.metric("Risk (%)", pct)
-        except Exception as e:
-            msg_box.error(f"Inference error: {e}")
+    fat_c = float(DR1TTFAT) * 0.001
+    s += fat_c; contribs.append(("Total fat (g)", fat_c))
+
+    # Physical activity (protective)
+    pa_c = -0.05 * float(PAQ620)
+    s += pa_c; contribs.append(("Moderate activity days/week", pa_c))
+
+    # Socio-economic (protective in this simple score)
+    fpl_c = -0.10 * max(0.0, float(INDFMPIR) - 1.0)
+    s += fpl_c; contribs.append(("Income-to-poverty ratio (>1)", fpl_c))
+
+    # Small bumps for male sex; race/ethnicity left neutral for fairness
+    gender_c = 0.10 if RIAGENDR == "Male" else 0.0
+    s += gender_c; contribs.append(("Male sex", gender_c))
+
+    # Having ≥12 drinks last year (tiny bump; mostly captured above)
+    any_alcohol_c = 0.05 if ALQ111 == "Yes" else 0.0
+    s += any_alcohol_c; contribs.append(("Had ≥12 drinks last year", any_alcohol_c))
+
+    # Convert to probability (logistic)
+    proba = 1.0 / (1.0 + math.exp(-s))
+    # Sort contributions by absolute impact, top 8 for display
+    contribs.sort(key=lambda x: abs(x[1]), reverse=True)
+    return proba, contribs[:8]
+
+with st.form("risk_form"):
+    st.subheader("Sociodemographic & Lifestyle Data")
+
+    st.markdown("### Sociodemographic Data")
+    c1, c2 = st.columns(2)
+    with c1:
+        RIAGENDR = st.selectbox("Gender (RIAGENDR)", CHOICES["RIAGENDR"])
+        RIDRETH3 = st.selectbox("Race/Ethnicity (RIDRETH3)", CHOICES["RIDRETH3"])
+    with c2:
+        RIDAGEYR = st.slider("Age in Years (RIDAGEYR)", 18, 99, 45)
+        INDFMPIR = st.number_input("Family Income-to-Poverty Ratio (INDFMPIR)", min_value=0.0, value=1.5, step=0.1)
+
+    st.markdown("### Alcohol and Smoking Data")
+    c3, c4 = st.columns(2)
+    with c3:
+        ALQ111 = st.selectbox("Had at least 12 alcohol drinks/1 yr? (ALQ111)", CHOICES["ALQ111"])
+        ALQ142 = st.number_input("Average number of drinks on days consumed (ALQ142)", min_value=0.0, value=2.0, step=0.5)
+        Is_Smoker_Cat = st.selectbox("Smoking Status (Is_Smoker_Cat)", CHOICES["Is_Smoker_Cat"])
+    with c4:
+        ALQ121 = st.number_input("How often do you drink in the last year? (ALQ121, days)", min_value=0.0, value=100.0, step=1.0)
+        ALQ170 = st.number_input("Number of days had 5+/4+ drinks? (ALQ170)", min_value=0.0, value=0.0, step=1.0)
+        ALQ151 = st.selectbox("Ever had 5+/4+ drinks in a day? (ALQ151)", CHOICES["ALQ151"])
+
+    st.markdown("### Sleep Data")
+    c5, c6 = st.columns(2)
+    with c5:
+        SLQ050 = st.selectbox("How often have trouble sleeping? (SLQ050)", CHOICES["SLQ050"])
+    with c6:
+        SLD012 = st.slider("Average sleep hours per day (SLD012)", 1, 12, 7)
+        SLQ120 = st.selectbox("Had a medical sleep diagnosis? (SLQ120)", CHOICES["SLQ120"])
+
+    st.markdown("### Dietary Intake (Last 24 Hours)")
+    c7, c8, c9 = st.columns(3)
+    with c7:
+        DR1TKCAL = st.number_input("Total Kilocalories (DR1TKCAL)", min_value=0.0, value=2000.0, step=50.0)
+        DR1TPROT = st.number_input("Total Protein (DR1TPROT)", min_value=0.0, value=75.0, step=5.0)
+    with c8:
+        DR1TCARB = st.number_input("Total Carbohydrates (DR1TCARB)", min_value=0.0, value=250.0, step=5.0)
+        DR1TSUGR = st.number_input("Total Sugar (DR1TSUGR)", min_value=0.0, value=90.0, step=5.0)
+    with c9:
+        DR1TFIBE = st.number_input("Total Fiber (DR1TFIBE)", min_value=0.0, value=25.0, step=1.0)
+        DR1TTFAT = st.number_input("Total Fat (DR1TTFAT)", min_value=0.0, value=65.0, step=2.0)
+
+    st.markdown("### Physical & Anthropometric Data")
+    c10, c11 = st.columns(2)
+    with c10:
+        PAQ620 = st.slider("Days of moderate activity per week (PAQ620)", 0, 7, 3)
+    with c11:
+        BMXBMI = st.number_input("BMI (BMXBMI)", min_value=10.0, max_value=80.0, value=28.0, step=0.1)
+
+    submit = st.form_submit_button("Get Risk Assessment")
+
+if submit:
+    proba, top_contribs = compute_risk_and_contribs(
+        RIAGENDR, RIDRETH3, RIDAGEYR, INDFMPIR,
+        ALQ111, ALQ142, Is_Smoker_Cat, ALQ121, ALQ170, ALQ151,
+        SLQ050, SLD012, SLQ120,
+        DR1TKCAL, DR1TPROT, DR1TCARB, DR1TSUGR, DR1TFIBE, DR1TTFAT,
+        PAQ620, BMXBMI
+    )
+
+    st.subheader("Your Results")
+    st.metric("Estimated probability", f"{proba:.3f}")
+    st.progress(min(1.0, proba))
+
+    if proba >= 0.5:
+        st.error("Based on your data, you may be at **higher risk** for NAFLD.")
+    else:
+        st.success("Based on your data, you may be at **lower risk** (threshold 0.5).")
+
+    st.caption("This is a screening aid based on a transparent heuristic—not a medical diagnosis.")
+
+    st.markdown("#### Top contributing factors")
+    for name, val in top_contribs:
+        sign = "▲" if val >= 0 else "▼"
+        st.write(f"- {sign} **{name}**: {val:+.3f}")
+
+st.divider()
+st.caption("No external model or data files required. This app uses a transparent rule-based score so it runs anywhere.")
