@@ -1,36 +1,14 @@
-# streamlit_app.py (use as app.py in your repo)
-import json
-import joblib
+import os, json
 import pandas as pd
-import streamlit as st
-
-# ---------- Page ----------
-st.set_page_config(page_title="NAFLD Lifestyle Risk Predictor", page_icon="🧠", layout="wide")
-st.title("NAFLD Lifestyle Risk Predictor")
-st.caption("This app estimates your likelihood of NAFLD using lifestyle and demographic inputs. "
-           "It is not a medical diagnosis and should not replace professional medical advice.")
+import joblib
+import gradio as gr
 
 # ---------- Load artifacts ----------
-@st.cache_resource
-def load_pipeline():
-    return joblib.load("pipeline.pkl")
+pipeline = joblib.load("pipeline.pkl")
+with open("feature_order.json") as f:
+    FEATURES = [s.strip() for s in json.load(f) if str(s).strip()]
 
-@st.cache_resource
-def load_features():
-    with open("feature_order.json") as f:
-        feats = json.load(f)
-    # clean empties/dups while keeping order
-    clean, seen = [], set()
-    for x in feats:
-        n = str(x).strip()
-        if n and n not in seen:
-            clean.append(n); seen.add(n)
-    return clean
-
-pipeline = load_pipeline()
-FEATURES = load_features()
-
-# ---------- UI dicts ----------
+# ---------- Choices & ranges ----------
 CATEGORICAL_CHOICES = {
     "Gender": ["Male", "Female"],
     "Race/Ethnicity": ["Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other"],
@@ -39,111 +17,100 @@ CATEGORICAL_CHOICES = {
 }
 
 RANGE_PRESETS = {
-    # Demographics / socioeconomics
-    "Age in years": dict(min_value=18, max_value=85, value=40, step=1.0),
-    "Family income ratio": dict(min_value=0.0, max_value=5.0, value=2.0, step=0.1),
-
-    # Sleep / activity
-    "Sleep duration (hours/day)": dict(min_value=3.0, max_value=12.0, value=7.0, step=0.5),
-    "Work schedule duration (hours)": dict(min_value=0.0, max_value=16.0, value=8.0, step=0.5),
-    "Physical activity (minutes/day)": dict(min_value=0, max_value=300, value=30, step=5),
-
-    # Anthropometrics
-    "BMI": dict(min_value=15.0, max_value=50.0, value=28.0, step=0.1),
-
-    # Alcohol
-    "Number of days drank in the past year": dict(min_value=0, max_value=365, value=0, step=1),
-    "Alcohol consumption (days/week)": dict(min_value=0.0, max_value=7.0, value=0.0, step=0.5),
-    "Alcohol drinks per day": dict(min_value=0.0, max_value=10.0, value=0.0, step=0.5),
-    "Max number of drinks on any single day": dict(min_value=0, max_value=20, value=0, step=1),
-    "Alcohol intake frequency (drinks/day)": dict(min_value=0.0, max_value=10.0, value=0.0, step=0.1),
-
-    # Diet
-    "Total calorie intake (kcal)": dict(min_value=800, max_value=5000, value=2200, step=50),
-    "Total fat (g)": dict(min_value=10, max_value=200, value=70, step=1),
-    "Saturated fat (g)": dict(min_value=0, max_value=80, value=25, step=1),
-    "Added sugar (g)": dict(min_value=0, max_value=150, value=30, step=1),
-    "Dietary fiber (g)": dict(min_value=0, max_value=80, value=20, step=1),
-    "Fruit/veg servings per day": dict(min_value=0.0, max_value=10.0, value=3.0, step=0.5),
-    "Sugary drinks per week": dict(min_value=0.0, max_value=50.0, value=0.0, step=1.0),
-}
-
-HELP_TEXT = {
-    "Family income ratio": "NHANES Poverty Income Ratio (0–~5, higher ≈ higher income).",
-    "Alcohol intake frequency (drinks/day)": "Average daily number of drinks.",
+    "Age in years": dict(minimum=18, maximum=85, value=40, step=1),
+    "Family income ratio": dict(minimum=0.0, maximum=5.0, value=2.0, step=0.1),
+    "Sleep duration (hours/day)": dict(minimum=3.0, maximum=12.0, value=7.0, step=0.5),
+    "Work schedule duration (hours)": dict(minimum=0.0, maximum=16.0, value=8.0, step=0.5),
+    "Physical activity (minutes/day)": dict(minimum=0, maximum=300, value=30, step=5),
+    "BMI": dict(minimum=15.0, maximum=50.0, value=28.0, step=0.1),
+    "Number of days drank in the past year": dict(minimum=0, maximum=365, value=0, step=1),
+    "Alcohol consumption (days/week)": dict(minimum=0.0, maximum=7.0, value=0.0, step=0.5),
+    "Alcohol drinks per day": dict(minimum=0.0, maximum=10.0, value=0.0, step=0.5),
+    "Max number of drinks on any single day": dict(minimum=0, maximum=20, value=0, step=1),
+    "Alcohol intake frequency (drinks/day)": dict(minimum=0.0, maximum=10.0, value=0.0, step=0.1),
+    "Total calorie intake (kcal)": dict(minimum=800, maximum=5000, value=2200, step=50),
+    "Total fat (g)": dict(minimum=10, maximum=200, value=70, step=1),
+    "Saturated fat (g)": dict(minimum=0, maximum=80, value=25, step=1),
+    "Added sugar (g)": dict(minimum=0, maximum=150, value=30, step=1),
+    "Dietary fiber (g)": dict(minimum=0, maximum=80, value=20, step=1),
+    "Fruit/veg servings per day": dict(minimum=0.0, maximum=10.0, value=3.0, step=0.5),
+    "Sugary drinks per week": dict(minimum=0.0, maximum=50.0, value=0.0, step=1.0),
 }
 
 GROUPS = {
     "Demographics": [
-        "Gender", "Age in years", "Race/Ethnicity", "Family income ratio", "Smoking status"
+        "Gender","Age in years","Race/Ethnicity","Family income ratio","Smoking status"
     ],
     "Sleep & Activity": [
-        "Sleep Disorder Status", "Sleep duration (hours/day)",
-        "Work schedule duration (hours)", "Physical activity (minutes/day)"
+        "Sleep Disorder Status","Sleep duration (hours/day)",
+        "Work schedule duration (hours)","Physical activity (minutes/day)"
     ],
     "Anthropometrics": ["BMI"],
     "Alcohol": [
-        "Number of days drank in the past year", "Alcohol consumption (days/week)",
-        "Alcohol drinks per day", "Max number of drinks on any single day",
+        "Number of days drank in the past year","Alcohol consumption (days/week)",
+        "Alcohol drinks per day","Max number of drinks on any single day",
         "Alcohol intake frequency (drinks/day)"
     ],
     "Diet": [
-        "Total calorie intake (kcal)", "Total fat (g)", "Saturated fat (g)",
-        "Added sugar (g)", "Dietary fiber (g)", "Fruit/veg servings per day", "Sugary drinks per week"
+        "Total calorie intake (kcal)","Total fat (g)","Saturated fat (g)",
+        "Added sugar (g)","Dietary fiber (g)","Fruit/veg servings per day","Sugary drinks per week"
     ],
 }
 
 def widget_for(name: str):
-    help_txt = HELP_TEXT.get(name)
     if name in CATEGORICAL_CHOICES:
-        return st.selectbox(name, CATEGORICAL_CHOICES[name], help=help_txt, key=name)
+        return gr.Dropdown(CATEGORICAL_CHOICES[name], label=name)
     if name in RANGE_PRESETS:
-        p = RANGE_PRESETS[name]
-        # slider for narrow ranges, number_input otherwise
-        if (p["max_value"] - p["min_value"]) <= 200:
-            return st.slider(name, help=help_txt, **p)
-        else:
-            return st.number_input(name, help=help_txt, **p)
-    return st.number_input(name, value=0.0, step=0.1, help=help_txt, key=name)
+        return gr.Slider(label=name, **RANGE_PRESETS[name])
+    return gr.Number(label=name)
 
-# ---------- Layout ----------
-left, right = st.columns([2, 1])
+def predict_fn(*values):
+    X = pd.DataFrame([values], columns=FEATURES)
+    proba = float(pipeline.predict_proba(X)[:, 1][0])
+    pct = round(proba * 100, 1)
+    band = "High risk" if pct >= 50 else "Low/moderate risk"
+    return f"**Predicted NAFLD risk: {pct}% — {band}**", pct
 
-with left:
-    st.subheader("Inputs")
-    values_dict = {}
+theme = gr.themes.Soft()
+with gr.Blocks(title="NAFLD Lifestyle Risk Predictor", theme=theme) as demo:
+    gr.Markdown(
+        "# NAFLD Lifestyle Risk Predictor\n"
+        "This app estimates your likelihood of NAFLD using lifestyle and demographic inputs. "
+        "It is not a medical diagnosis and should not replace professional medical advice."
+    )
 
-    # Render by groups, only for features present in FEATURES (order preserved)
-    for group_name, group_feats in GROUPS.items():
-        feats = [f for f in FEATURES if f in group_feats]
-        if feats:
-            with st.expander(group_name, expanded=True):
-                cols = st.columns(2)
-                for i, fname in enumerate(feats):
-                    with cols[i % 2]:
-                        values_dict[fname] = widget_for(fname)
+    # Render inputs in model order, grouped for layout
+    inputs = []
+    order_groups = ["Demographics","Sleep & Activity","Anthropometrics","Alcohol","Diet"]
+    grouped = {g: [] for g in order_groups}
+    other = []
+    for name in FEATURES:
+        placed = False
+        for g, flist in GROUPS.items():
+            if name in flist:
+                grouped[g].append(name); placed = True; break
+        if not placed:
+            other.append(name)
 
-    remaining = [f for f in FEATURES if all(f not in g for g in GROUPS.values())]
-    if remaining:
-        with st.expander("Other", expanded=False):
-            cols = st.columns(2)
-            for i, fname in enumerate(remaining):
-                with cols[i % 2]:
-                    values_dict[fname] = widget_for(fname)
+    for g in order_groups:
+        if grouped[g]:
+            with gr.Accordion(g, open=True):
+                with gr.Row():
+                    half = (len(grouped[g]) + 1)//2
+                    with gr.Column():
+                        for fname in grouped[g][:half]: inputs.append(widget_for(fname))
+                    with gr.Column():
+                        for fname in grouped[g][half:]: inputs.append(widget_for(fname))
 
-values = [values_dict[f] for f in FEATURES]  # keep exact model order
+    if other:
+        with gr.Accordion("Other", open=False):
+            for fname in other:
+                inputs.append(widget_for(fname))
 
-with right:
-    st.subheader("Prediction")
-    if st.button("Predict", type="primary", use_container_width=True):
-        try:
-            X = pd.DataFrame([values], columns=FEATURES)
-            proba = float(pipeline.predict_proba(X)[:, 1][0])
-            pct = round(proba * 100, 1)
-            band = "High risk" if pct >= 50 else "Low/moderate risk"
+    out_text = gr.Markdown("")
+    out_bar  = gr.Slider(0, 100, value=0.0, step=0.1, interactive=False, label="Predicted probability (%)")
+    gr.Button("Predict", variant="primary").click(predict_fn, inputs=inputs, outputs=[out_text, out_bar])
 
-            st.progress(proba, text="Predicted probability")
-            st.success(f"Predicted NAFLD risk: **{pct}%** — **{band}**")
-            st.metric("Risk (%)", pct)
-        except Exception as e:
-            st.error(f"Inference error: {e}")
+if __name__ == "__main__":
+    # Works locally and on Hugging Face (Docker)
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", "7860")))
